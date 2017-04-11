@@ -41,9 +41,17 @@ class Parcel {
       const prefix = file.endsWith('.json') ? 'module.exports =' : ''
       const deps = this.stringifyDeps(info.deps)
       const filename = this.jsPath(file)
-      yield `\n  Parcel.files[${filename}] = ${id}; ${id}.deps = ${deps}; ${id}.filename = ${filename}; function ${id}(module, exports, require) {${prefix}\n`
-      yield info.source
-      yield `}`
+      yield `\n  `
+      if (info.raw) {
+        yield `var ${id} = `
+        yield JSON.stringify(info.source)
+        yield `;`
+      } else {
+        yield `function ${id}(module, exports, require) {${prefix}\n`
+        yield info.source
+        yield `}`
+      }
+      yield `\n  Parcel.files[${filename}] = ${id}; ${id}.raw = ${info.raw}; ${id}.deps = ${deps}; ${id}.filename = ${filename};`
     }
     const main = this.namePath(this.main)
     yield `\n  Parcel.main = ${main}; Parcel.makeRequire(null)()`
@@ -113,18 +121,25 @@ class Parcel {
     map.mappings = mappings.join(';')
     return JSON.stringify(map)
   }
-  include(file, cb) {
+  include(file, cb, raw) {
     if (!file || this.files.has(file)) return process.nextTick(cb)
     fs.readFile(file, {encoding: 'utf8'}, (e, js) => {
       if (e) return cb(e)
-      if (js[0] === '#' && js[1] === '!') {
+      if (js[0] === '#' && js[1] === '!' && !raw) {
         js = '//' + js.slice(2)
       }
-      const info = {source: js}
+      const info = { source: js, raw: !!raw }
       this.files.set(file, info)
+      if (raw) {
+        info.deps = new Map
+        return cb()
+      }
       const deps = new Set
       let x
       while (x = REQUIRE_RE.exec(js)) {
+        deps.add(JSON.parse('"' + (x[1] || x[2] || '') + '"'))
+      }
+      while (x = REQUIRE_RAW_RE.exec(js)) {
         deps.add(JSON.parse('"' + (x[1] || x[2] || '') + '"'))
       }
       const depsArr = Array.from(deps)
@@ -135,7 +150,7 @@ class Parcel {
           info.deps.set(depsArr[i], resolved[i])
         }
         const files = new Set(resolved.filter(x => x))
-        map(files, (f, cb) => this.include(f, cb), e => cb(e))
+        map(files, (f, cb) => this.include(f, cb, true), e => cb(e))
       })
     })
   }
@@ -200,6 +215,7 @@ class Parcel {
 }
 
 const REQUIRE_RE = /\brequire\s*\(\s*(?:'((?:[^'\n]+|\\[^])*)'|"((?:[^"\n]+|\\[^])*)")\s*\)/g
+const REQUIRE_RAW_RE = /\brequire\s*\.raw\s*\(\s*(?:'((?:[^'\n]+|\\[^])*)'|"((?:[^"\n]+|\\[^])*)")\s*\)/g
 
 const CORE_MODULES = new Set(['assert', 'buffer', 'child_process', 'cluster', 'crypto', 'dgram', 'dns', 'domain', 'events', 'fs', 'http', 'https', 'net', 'os', 'path', 'punycode', 'querystring', 'readline', 'stream', 'string_decoder', 'tls', 'tty', 'url', 'util', 'v8', 'vm', 'zlib'])
 
@@ -244,6 +260,7 @@ const JS_START = '~' + function(global) {
       module.require.deps = fn.deps
       module.require.main = self ? self.require.main : module
       if (self) self.children.push(module)
+      if (fn.raw || typeof fn === 'string') return fn
       fn(module, module.exports, module.require)
       module.loaded = true
       return module.exports
